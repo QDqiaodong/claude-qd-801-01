@@ -43,11 +43,17 @@ public class GlobalExceptionHandler {
     }
 
     /**
-     * 唯一约束冲突：400（避免在页面上抛出非人话的外键报错）
+     * 唯一约束冲突：400（避免在页面上抛出非人话的外键报错）。
+     * 试块编号 / 结果 / 复检的并发冲突在 Service 内已先捕获为具体业务提示，这里只兜底。
      */
     @ExceptionHandler(DataIntegrityViolationException.class)
     public ResponseEntity<ApiResponse<Void>> handleIntegrity(DataIntegrityViolationException e) {
-        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(ApiResponse.fail("存在唯一性约束冲突，请检查编号、手机号是否重复"));
+        String message = e.getMostSpecificCause() == null ? null : e.getMostSpecificCause().getMessage();
+        String detail = "存在唯一性约束冲突，请检查编号、手机号是否重复";
+        if (message != null && message.length() > 254) {
+            detail = message.substring(0, 254);
+        }
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(ApiResponse.fail(detail));
     }
 
     /**

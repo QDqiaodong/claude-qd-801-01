@@ -22,6 +22,12 @@ public interface DispatchTicketRepository extends JpaRepository<DispatchTicket, 
     List<DispatchTicket> findByTruckId(@Param("truckId") Long truckId);
 
     /**
+     * 试块登记可选发车单：同一任务单下已装车（含已出厂/已到工地/已签收）的发车单，按装车时间升序。
+     */
+    @Query("select t from DispatchTicket t where t.order.id = :orderId order by t.loadTime asc, t.id asc")
+    List<DispatchTicket> findLoadedByOrderId(@Param("orderId") Long orderId);
+
+    /**
      * 手写 JPQL 四：按工地汇总发货量（只统计已签收）。
      */
     @Query("select new com.concrete.plant.dto.SiteDeliveryVO(t.order.projectName, sum(t.signVolume), count(t)) "

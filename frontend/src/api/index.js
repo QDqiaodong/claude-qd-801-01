@@ -84,7 +84,16 @@ export const api = {
   statGrade: () => http.get('/stats/grade'),
   statSite: () => http.get('/stats/site'),
   statDaily: (date) => http.get('/stats/daily', { params: date ? { date } : {} }),
-  dashboard: () => http.get('/stats/dashboard')
+  dashboard: () => http.get('/stats/dashboard'),
+
+  // 试块质检（判定与状态只取服务端，页面不自行计算/覆盖）
+  qualityCriteria: () => http.get('/quality/criteria'),
+  cubeGroups: (params) => http.get('/quality/groups', { params }),
+  cubeGroup: (id) => http.get(`/quality/groups/${id}`),
+  registerCube: (data) => http.post('/quality/groups', data),
+  qualityItems: (params) => http.get('/quality/items', { params }),
+  submitResult: (itemId, data) => http.post(`/quality/items/${itemId}/results`, data),
+  submitRecheck: (recheckId, data) => http.post(`/quality/rechecks/${recheckId}/submit`, data)
 }
 
 export default api

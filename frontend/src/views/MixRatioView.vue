@@ -18,7 +18,7 @@
       <div class="cp-panel-body">
         <div v-if="!orders.length" class="cp-empty">暂无任务单</div>
         <div v-else class="mr-grid">
-          <div v-for="o in orders" :key="o.id" class="mr-card" :class="{ 'is-over': localOver(o) }">
+          <div v-for="o in orders" :key="o.id" class="mr-card" :class="{ 'is-over': localOver(o) }" :data-order-id="o.id">
             <div class="mr-head">
               <b>{{ o.orderNo }}</b>
               <span class="cp-badge" :style="{ background: gradeColor(o.strengthGrade) }">{{ o.strengthGrade }}</span>
@@ -88,6 +88,7 @@
               </span>
               <span class="cp-muted">胶材 {{ o.binderDosage }} kg/m³</span>
               <span style="margin-left: auto; display: flex; gap: 6px">
+                <el-button size="small" @click="viewChain(o)">试块检测链</el-button>
                 <el-button v-if="o.status === 'PENDING'" size="small" type="primary" @click="start(o)">开工校验</el-button>
                 <el-button v-if="o.status === 'PRODUCING'" size="small" @click="finish(o)">收尾完成</el-button>
               </span>
@@ -100,9 +101,10 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { onMounted, reactive, ref, watch, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
 import { api } from '../api'
+import { goQualityForOrder, nav } from '../nav'
 
 const orders = ref([])
 const grades = ['C25', 'C30', 'C35', 'C40']
@@ -233,7 +235,29 @@ function orderClass(status) {
   return { PENDING: 'warn', PRODUCING: 'run', DONE: 'ok' }[status] || ''
 }
 
-onMounted(load)
+/** 从任务单查看完整检测链（留样 → 7d/28d → 复检） */
+function viewChain(order) {
+  goQualityForOrder(order.id)
+}
+
+// 从试块详情页跳回任务单时清空筛选并定位
+async function handleMixOrder(orderId) {
+  if (orderId == null) return
+  filter.status = ''
+  filter.grade = ''
+  await load()
+  await nextTick()
+  const el = document.querySelector(`[data-order-id="${orderId}"]`)
+  el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  nav.mixOrderId = null
+}
+
+watch(() => nav.mixOrderId, handleMixOrder)
+
+onMounted(() => {
+  load()
+  if (nav.mixOrderId != null) handleMixOrder(nav.mixOrderId)
+})
 </script>
 
 <style scoped>

@@ -32,6 +32,26 @@ public final class Dict {
             "C35", BigDecimal.valueOf(380),
             "C40", BigDecimal.valueOf(420));
 
+    // ---------------- 试块抗压强度判定（数据库/后端/前端共用的唯一判定来源） ----------------
+    /** 立方体抗压强度标准值 fcu,k（MPa），即各强度等级的设计值 */
+    private static final Map<String, BigDecimal> GRADE_DESIGN_STRENGTH = Map.of(
+            "C25", BigDecimal.valueOf(25),
+            "C30", BigDecimal.valueOf(30),
+            "C35", BigDecimal.valueOf(35),
+            "C40", BigDecimal.valueOf(40));
+
+    /** 28d 评定：三块平均值不低于 1.15·fcu,k（非统计方法，GB/T 50107-2010 第 5.2.2 条） */
+    public static final BigDecimal R28_AVG_FACTOR = BigDecimal.valueOf(1.15);
+
+    /** 28d 评定：三块最小值不低于 0.95·fcu,k */
+    public static final BigDecimal R28_MIN_FACTOR = BigDecimal.valueOf(0.95);
+
+    /** 7d 早龄期趋势线：平均值达到 0.75·fcu,k 视为趋势正常（仅趋势提示，不改变最终质量状态） */
+    public static final BigDecimal R7_TREND_FACTOR = BigDecimal.valueOf(0.75);
+
+    /** 一组试块的抗压试件数量 */
+    public static final int CUBE_SPECIMEN_COUNT = 3;
+
     // ---------------- 配合比材料 ----------------
     public static final List<String> MATERIALS = List.of(
             "CEMENT", "FLYASH", "SLAG", "SAND", "STONE", "WATER", "ADMIXTURE");
@@ -99,6 +119,47 @@ public final class Dict {
             "APPROVED", "已通过",
             "REJECTED", "已驳回");
 
+    // ---------------- 试块养护方式 ----------------
+    private static final Map<String, String> CURING_METHOD = Map.of(
+            "STANDARD", "标准养护",
+            "ONSITE", "同条件养护");
+
+    // ---------------- 试块组状态 ----------------
+    private static final Map<String, String> CUBE_GROUP_STATUS = Map.of(
+            "TESTING", "检测中",
+            "QUALIFIED", "已合格",
+            "RECHECK", "待复检",
+            "UNQUALIFIED", "不合格");
+
+    // ---------------- 检测项持久状态（待检/逾期/未到期/已合格 由服务端按时钟派生） ----------------
+    private static final Map<String, String> TEST_ITEM_STATUS = Map.of(
+            "PENDING", "待检",
+            "DONE", "已检测",
+            "RECHECK", "待复检");
+
+    // ---------------- 检测项页面派生状态 ----------------
+    private static final Map<String, String> ITEM_FLOW_STATUS = Map.of(
+            "NOT_DUE", "未到期",
+            "DUE", "待检",
+            "OVERDUE", "逾期",
+            "QUALIFIED", "已合格",
+            "RECHECK", "待复检",
+            "UNQUALIFIED", "不合格",
+            "TREND_OK", "7d 趋势正常",
+            "TREND_LOW", "7d 趋势偏低");
+
+    // ---------------- 检测结果判定 ----------------
+    private static final Map<String, String> RESULT_VERDICT = Map.of(
+            "QUALIFIED", "合格",
+            "UNQUALIFIED", "不合格",
+            "TREND_OK", "趋势正常",
+            "TREND_LOW", "趋势偏低");
+
+    // ---------------- 复检任务状态 ----------------
+    private static final Map<String, String> RECHECK_STATUS = Map.of(
+            "PENDING", "待复检",
+            "DONE", "已复检");
+
     // ---------------- 筒仓材料 ----------------
     private static final Map<String, String> SILO_MATERIAL_NAME = Map.of(
             "CEMENT", "水泥",
@@ -135,6 +196,43 @@ public final class Dict {
 
     public static BigDecimal gradeMinBinder(String grade) {
         return GRADE_MIN_BINDER.getOrDefault(grade, BigDecimal.valueOf(300));
+    }
+
+    /** 强度等级设计值 fcu,k（MPa）；未知等级返回 0，由调用方决定是否报错 */
+    public static BigDecimal gradeDesignStrength(String grade) {
+        return GRADE_DESIGN_STRENGTH.getOrDefault(grade, BigDecimal.ZERO);
+    }
+
+    public static boolean isValidCuringMethod(String method) {
+        return method != null && CURING_METHOD.containsKey(method);
+    }
+
+    public static String curingMethodName(String method) {
+        return method == null ? "" : CURING_METHOD.getOrDefault(method, method);
+    }
+
+    public static boolean isValidCubeGroupStatus(String status) {
+        return status != null && CUBE_GROUP_STATUS.containsKey(status);
+    }
+
+    public static String cubeGroupStatusName(String status) {
+        return status == null ? "" : CUBE_GROUP_STATUS.getOrDefault(status, status);
+    }
+
+    public static String testItemStatusName(String status) {
+        return status == null ? "" : TEST_ITEM_STATUS.getOrDefault(status, status);
+    }
+
+    public static String itemFlowStatusName(String flowStatus) {
+        return flowStatus == null ? "" : ITEM_FLOW_STATUS.getOrDefault(flowStatus, flowStatus);
+    }
+
+    public static String verdictName(String verdict) {
+        return verdict == null ? "" : RESULT_VERDICT.getOrDefault(verdict, verdict);
+    }
+
+    public static String recheckStatusName(String status) {
+        return status == null ? "" : RECHECK_STATUS.getOrDefault(status, status);
     }
 
     public static boolean isValidMaterial(String material) {

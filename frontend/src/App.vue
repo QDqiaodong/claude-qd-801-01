@@ -18,7 +18,7 @@
           :key="step.key"
           class="cp-step"
           :class="{ active: step.key === current }"
-          @click="current = step.key"
+          @click="selectStep(step.key)"
         >
           <div class="cp-step-dot">{{ String(index + 1).padStart(2, '0') }}</div>
           <div class="cp-step-body">
@@ -57,18 +57,19 @@
         <KeepAlive>
           <component :is="activeStep.comp" :key="current" />
         </KeepAlive>
-      </div>
-    </div>
+      </div>    </div>
   </div>
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { api } from './api'
+import { goStep, nav } from './nav'
 import MixerLoadView from './views/MixerLoadView.vue'
 import MixRatioView from './views/MixRatioView.vue'
 import DispatchTrackView from './views/DispatchTrackView.vue'
 import SiloView from './views/SiloView.vue'
+import QualityView from './views/QualityView.vue'
 
 const steps = [
   {
@@ -82,7 +83,7 @@ const steps = [
     key: 'mix',
     title: '配料',
     sub: '任务单配合比卡',
-    desc: '强度等级徽章 + 环形占比图，就地改每方用量并重算水胶比',
+    desc: '强度等级徽章 + 环形占比图，就地改每方用量并重算水胶比，可查看该任务单完整检测链',
     comp: MixRatioView
   },
   {
@@ -98,13 +99,33 @@ const steps = [
     sub: '料仓液位与补料',
     desc: '筒仓液位柱告警、补料申请与审批',
     comp: SiloView
+  },
+  {
+    key: 'quality',
+    title: '质检',
+    sub: '试块留样与复检',
+    desc: '留样关联已装车发车单，7d/28d 抗压判定与唯一复检形成完整闭环',
+    comp: QualityView
   }
 ]
 
-const current = ref('task')
+const current = ref(nav.current)
 const dash = ref({})
 
 const activeStep = computed(() => steps.find((s) => s.key === current.value) || steps[0])
+
+function selectStep(key) {
+  current.value = key
+  goStep(key)
+}
+
+// 从任务单/质检详情等跨视图跳转时跟随 nav 切换
+watch(
+  () => nav.current,
+  (key) => {
+    if (key !== current.value) current.value = key
+  }
+)
 
 async function loadDashboard() {
   try {

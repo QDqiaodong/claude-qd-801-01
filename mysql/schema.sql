@@ -3,6 +3,13 @@
 SET NAMES utf8mb4;
 
 -- ========================= 建表 =========================
+-- 试块质检模块（先删，外键只依赖任务单/发车单）
+DROP TABLE IF EXISTS recheck_task;
+DROP TABLE IF EXISTS strength_result;
+DROP TABLE IF EXISTS strength_test_item;
+DROP TABLE IF EXISTS cube_dispatch_ticket;
+DROP TABLE IF EXISTS mix_snapshot_item;
+DROP TABLE IF EXISTS cube_group;
 DROP TABLE IF EXISTS fault_reassignment;
 DROP TABLE IF EXISTS fault_shutdown_record;
 DROP TABLE IF EXISTS replenish_request;
@@ -178,6 +185,129 @@ CREATE TABLE fault_reassignment (
     CONSTRAINT fk_fault_reassign_target FOREIGN KEY (target_mixer_id) REFERENCES mixer (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='故障任务改派明细';
 
+-- ========================= 试块质检模块 =========================
+
+-- 试块组（留样登记，聚合根）：登记时快照工程/强度等级/配合比
+CREATE TABLE cube_group (
+    id              BIGINT       NOT NULL AUTO_INCREMENT,
+    cube_no         VARCHAR(32)  NOT NULL COMMENT '试块编号（全系统唯一，并发只成功一次）',
+    order_id        BIGINT       NOT NULL COMMENT '所属生产任务单',
+    sampled_at      DATETIME     NOT NULL COMMENT '取样时间（7d/28d 到期日据此计算）',
+    curing_method   VARCHAR(16)  NOT NULL COMMENT '养护方式 STANDARD/ONSITE',
+    inspector       VARCHAR(32)  NOT NULL COMMENT '登记质检员',
+    status          VARCHAR(16)  NOT NULL COMMENT 'TESTING/QUALIFIED/RECHECK/UNQUALIFIED',
+    project_name    VARCHAR(128) NOT NULL COMMENT '工程名称快照',
+    strength_grade  VARCHAR(8)   NOT NULL COMMENT '强度等级快照 C25/C30/C35/C40',
+    pour_part       VARCHAR(128) NULL COMMENT '浇筑部位快照',
+    contractor      VARCHAR(128) NULL COMMENT '施工单位快照',
+    remark          VARCHAR(255) NULL,
+    created_at      DATETIME     NOT NULL COMMENT '登记时间',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_cube_no (cube_no),
+    KEY idx_cube_order (order_id),
+    KEY idx_cube_status (status),
+    KEY idx_cube_sampled (sampled_at),
+    CONSTRAINT fk_cube_order FOREIGN KEY (order_id) REFERENCES production_order (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='试块组（留样登记）';
+
+-- 试块组配合比快照（登记时按任务单复制，之后任务单改配比不影响质检判定来源）
+CREATE TABLE mix_snapshot_item (
+    id            BIGINT        NOT NULL AUTO_INCREMENT,
+    group_id      BIGINT        NOT NULL COMMENT '所属试块组',
+    material_code VARCHAR(16)   NOT NULL COMMENT '材料编码',
+    material_name VARCHAR(64)   NULL COMMENT '材料名称',
+    dosage        DECIMAL(10,2) NOT NULL COMMENT '每方用量 kg/m³ 快照',
+    ratio_percent DECIMAL(6,2)  NULL COMMENT '占比快照',
+    seq           INT           NULL COMMENT '展示顺序',
+    PRIMARY KEY (id),
+    KEY idx_snapshot_group (group_id),
+    CONSTRAINT fk_snapshot_group FOREIGN KEY (group_id) REFERENCES cube_group (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='试块组配合比快照';
+
+-- 试块组关联的已装车发车单（登记时至少关联一张同任务单已装车发车单）
+CREATE TABLE cube_dispatch_ticket (
+    id         BIGINT NOT NULL AUTO_INCREMENT,
+    group_id   BIGINT NOT NULL COMMENT '所属试块组',
+    ticket_id  BIGINT NOT NULL COMMENT '关联发车单（须同任务单且已装车）',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_group_ticket (group_id, ticket_id),
+    KEY idx_cdt_ticket (ticket_id),
+    CONSTRAINT fk_cdt_group FOREIGN KEY (group_id) REFERENCES cube_group (id) ON DELETE CASCADE,
+    CONSTRAINT fk_cdt_ticket FOREIGN KEY (ticket_id) REFERENCES dispatch_ticket (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='试块组关联发车单';
+
+-- 检测项：登记试块组时按取样时间生成 7d/28d 两条
+CREATE TABLE strength_test_item (
+    id          BIGINT      NOT NULL AUTO_INCREMENT,
+    group_id    BIGINT      NOT NULL COMMENT '所属试块组',
+    age_days    INT         NOT NULL COMMENT '龄期天数 7/28',
+    due_at      DATETIME    NOT NULL COMMENT '到期时间 = 取样时间 + 龄期',
+    status      VARCHAR(16) NOT NULL COMMENT 'PENDING/DONE/RECHECK（持久态；待检/逾期/未到期/合格/不合格由服务端按时钟派生）',
+    result_id   BIGINT      NULL COMMENT '正式结果（7d 趋势结果与 28d 判定结果均唯一，不可覆盖）',
+    created_at  DATETIME    NOT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_item_group_age (group_id, age_days),
+    UNIQUE KEY uk_item_result (result_id),
+    KEY idx_item_due (due_at),
+    KEY idx_item_status (status),
+    CONSTRAINT fk_item_group FOREIGN KEY (group_id) REFERENCES cube_group (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='抗压强度检测项';
+
+-- 抗压强度读数与判定：三块读数 + 服务端统一计算的平均/最小/判定
+CREATE TABLE strength_result (
+    id              BIGINT        NOT NULL AUTO_INCREMENT,
+    item_id         BIGINT       NOT NULL COMMENT '所属检测项',
+    group_id        BIGINT       NOT NULL COMMENT '所属试块组（冗余便于追溯）',
+    age_days        INT          NOT NULL COMMENT '龄期 7/28',
+    grade           VARCHAR(8)   NOT NULL COMMENT '判定时使用的强度等级快照',
+    strength_1      DECIMAL(6,2) NOT NULL COMMENT '试块 1 抗压强度 MPa',
+    strength_2      DECIMAL(6,2) NOT NULL COMMENT '试块 2 抗压强度 MPa',
+    strength_3      DECIMAL(6,2) NOT NULL COMMENT '试块 3 抗压强度 MPa',
+    avg_value       DECIMAL(6,2) NOT NULL COMMENT '平均值（服务端计算）',
+    min_value       DECIMAL(6,2) NOT NULL COMMENT '最小值（服务端计算）',
+    verdict         VARCHAR(16)  NOT NULL COMMENT '28d: QUALIFIED/UNQUALIFIED；7d: TREND_OK/TREND_LOW',
+    design_value    DECIMAL(6,2) NOT NULL COMMENT '设计强度 fcu,k 快照',
+    avg_threshold   DECIMAL(6,2) NOT NULL COMMENT '平均门槛（28d 1.15fcu,k / 7d 0.75fcu,k）快照',
+    min_threshold   DECIMAL(6,2) NOT NULL COMMENT '最小门槛（28d 0.95fcu,k）快照',
+    tested_at       DATETIME     NOT NULL COMMENT '检测时间',
+    operator_name   VARCHAR(32)  NOT NULL COMMENT '检测操作者',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_result_item (item_id),
+    KEY idx_result_group (group_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='抗压强度检测结果（原始读数不可覆盖）';
+
+-- 复检任务：28d 未达门槛时在同一事务内生成，每组至多一条
+CREATE TABLE recheck_task (
+    id                 BIGINT        NOT NULL AUTO_INCREMENT,
+    recheck_no         VARCHAR(32)   NOT NULL COMMENT '复检单号',
+    group_id           BIGINT        NOT NULL COMMENT '所属试块组',
+    original_item_id   BIGINT        NOT NULL COMMENT '原 28d 检测项（复检必须引用原检测）',
+    original_result_id BIGINT        NOT NULL COMMENT '原不合格结果（不可覆盖，仅引用）',
+    avg_1              DECIMAL(6,2)  NULL COMMENT '复检读数 1',
+    avg_2              DECIMAL(6,2)  NULL COMMENT '复检读数 2',
+    avg_3              DECIMAL(6,2)  NULL COMMENT '复检读数 3',
+    avg_value          DECIMAL(6,2)  NULL COMMENT '复检平均值',
+    min_value          DECIMAL(6,2)  NULL COMMENT '复检最小值',
+    verdict            VARCHAR(16)   NULL COMMENT '复检判定 QUALIFIED/UNQUALIFIED',
+    design_value       DECIMAL(6,2)  NULL COMMENT '设计强度快照',
+    avg_threshold      DECIMAL(6,2)  NULL COMMENT '平均门槛快照',
+    min_threshold      DECIMAL(6,2)  NULL COMMENT '最小门槛快照',
+    status             VARCHAR(16)   NOT NULL COMMENT 'PENDING/DONE',
+    created_at         DATETIME      NOT NULL COMMENT '生成时间（原结果提交时间）',
+    created_by         VARCHAR(32)   NOT NULL COMMENT '复检单生成人（原检测操作者）',
+    tested_at          DATETIME      NULL COMMENT '复检时间',
+    operator_name      VARCHAR(32)   NULL COMMENT '复检操作者',
+    remark             VARCHAR(255)  NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_recheck_no (recheck_no),
+    UNIQUE KEY uk_recheck_original_item (original_item_id),
+    KEY idx_recheck_group (group_id),
+    KEY idx_recheck_status (status),
+    CONSTRAINT fk_recheck_group FOREIGN KEY (group_id) REFERENCES cube_group (id),
+    CONSTRAINT fk_recheck_item FOREIGN KEY (original_item_id) REFERENCES strength_test_item (id),
+    CONSTRAINT fk_recheck_result FOREIGN KEY (original_result_id) REFERENCES strength_result (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='28d 不合格复检任务（唯一）';
+
 -- ========================= 种子数据 =========================
 
 INSERT INTO mixing_plant (plant_code, name, line_count, location) VALUES
@@ -233,6 +363,28 @@ INSERT INTO production_order (order_no, project_name, contractor, pour_part, str
 ('SC-2612', '高新产业园配套楼', '中铁十四局集团有限公司', '屋面刚性保护层', 'C25', 260.00, '120±30mm', 'PENDING',
    TIMESTAMP(DATE_ADD(CURDATE(), INTERVAL 2 DAY), '13:00:00'), TIMESTAMP(DATE_ADD(CURDATE(), INTERVAL 2 DAY), '17:00:00'),
    0.514, '保护层 40mm，随捣随抹', 5);
+
+-- 试块质检演示用：更早的已完成任务单（配合比由下方统一批量 INSERT 按强度等级生成）
+INSERT INTO production_order (order_no, project_name, contractor, pour_part, strength_grade, planned_volume,
+                              slump, status, planned_start, planned_end, water_binder_ratio, remark, mixer_id) VALUES
+('SC-2531', '滨海国际中心 A 座', '中建三局集团有限公司', '一期承台 A 区', 'C35', 520.00, '180±30mm', 'DONE',
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 30 DAY), '08:00:00'), TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 30 DAY), '15:00:00'),
+   0.375, '28d 试块合格样本', 3),
+('SC-2532', '云顶天境 2 号楼', '中天建设集团有限公司', '地下室外墙', 'C30', 460.00, '160±30mm', 'DONE',
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 30 DAY), '09:00:00'), TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 30 DAY), '16:00:00'),
+   0.430, '28d 不合格，待复检样本', 1),
+('SC-2533', '高新产业园研发楼', '中铁十四局集团有限公司', '基础筏板', 'C40', 720.00, '160±30mm', 'DONE',
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 31 DAY), '08:00:00'), TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 31 DAY), '17:00:00'),
+   0.336, '复检仍失败，锁定不合格样本', 3),
+('SC-2534', '星海城 6 号楼', '中建八局集团有限公司', '一层柱', 'C25', 380.00, '180±30mm', 'DONE',
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 29 DAY), '09:00:00'), TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 29 DAY), '15:00:00'),
+   0.514, '初检不合格、复检合格样本', 2),
+('SC-2535', '江滨路综合管廊', '上海隧道工程有限公司', '管廊底板 K0+800', 'C40', 400.00, '160±30mm', 'DONE',
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 8 DAY), '08:30:00'), TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 8 DAY), '16:00:00'),
+   0.336, '抗渗 P8，今日到 7d 龄期样本', 4),
+('SC-2536', '城东污水处理厂二期', '北京城建集团有限责任公司', '沉淀池顶板 A 段', 'C30', 360.00, '140±30mm', 'DONE',
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 10 DAY), '08:00:00'), TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 10 DAY), '15:00:00'),
+   0.430, '7d 逾期未录样本', 5);
 
 -- 配合比明细：按任务单强度等级套用参考配合比（kg/m³）
 INSERT INTO mix_ratio_item (order_id, material_code, material_name, dosage, ratio_percent, seq)
@@ -322,6 +474,31 @@ INSERT INTO dispatch_ticket (ticket_no, order_id, truck_id, load_volume, load_ti
 ('FC-0029', 7, 10, 12.00, TIMESTAMP(CURDATE(), '09:00:00'), NULL, NULL, NULL, 'LOADED', '等待出厂检验'),
 ('FC-0030', 7, 4, 12.00, TIMESTAMP(CURDATE(), '09:40:00'), NULL, NULL, NULL, 'LOADED', NULL);
 
+-- 老任务单的已签收发车单（试块登记须关联同任务单已装车发车单）
+INSERT INTO dispatch_ticket (ticket_no, order_id, truck_id, load_volume, load_time, depart_time, arrive_time,
+                             sign_volume, status, remark) VALUES
+('FC-1001', (SELECT id FROM production_order WHERE order_no = 'SC-2531'), 1, 12.00,
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 30 DAY), '08:20:00'), TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 30 DAY), '08:32:00'),
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 30 DAY), '09:15:00'), 12.00, 'SIGNED', NULL),
+('FC-1002', (SELECT id FROM production_order WHERE order_no = 'SC-2531'), 3, 11.50,
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 30 DAY), '09:10:00'), TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 30 DAY), '09:22:00'),
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 30 DAY), '10:05:00'), 11.40, 'SIGNED', NULL),
+('FC-1003', (SELECT id FROM production_order WHERE order_no = 'SC-2532'), 2, 10.00,
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 30 DAY), '09:15:00'), TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 30 DAY), '09:26:00'),
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 30 DAY), '10:10:00'), 10.00, 'SIGNED', NULL),
+('FC-1004', (SELECT id FROM production_order WHERE order_no = 'SC-2533'), 5, 12.00,
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 31 DAY), '08:15:00'), TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 31 DAY), '08:27:00'),
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 31 DAY), '09:10:00'), 11.90, 'SIGNED', NULL),
+('FC-1005', (SELECT id FROM production_order WHERE order_no = 'SC-2534'), 7, 11.00,
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 29 DAY), '09:10:00'), TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 29 DAY), '09:22:00'),
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 29 DAY), '10:06:00'), 11.00, 'SIGNED', NULL),
+('FC-1006', (SELECT id FROM production_order WHERE order_no = 'SC-2535'), 9, 12.00,
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 8 DAY), '08:40:00'), TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 8 DAY), '08:52:00'),
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 8 DAY), '09:35:00'), 12.00, 'SIGNED', '同条件养护试块取样车次'),
+('FC-1007', (SELECT id FROM production_order WHERE order_no = 'SC-2536'), 8, 10.50,
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 10 DAY), '08:30:00'), TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 10 DAY), '08:42:00'),
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 10 DAY), '09:25:00'), 10.50, 'SIGNED', NULL);
+
 INSERT INTO silo (silo_code, name, material_code, capacity_ton, stock_ton, safety_stock_ton) VALUES
 ('SIL-C01', '1# 水泥仓',  'CEMENT', 200.00, 132.50, 40.00),
 ('SIL-C02', '2# 水泥仓',  'CEMENT', 200.00,  88.00, 40.00),
@@ -350,3 +527,174 @@ INSERT INTO replenish_request (request_no, silo_id, quantity_ton, applicant, sta
    TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 2 DAY), '11:30:00'), '供应商批次未定，暂缓采购'),
 ('BL-2608', 5,  25.00, '孙 磊',  'REJECTED', TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 1 DAY), '15:40:00'), '生产经理 何斌',
    TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 1 DAY), '16:10:00'), '仓位尚可，先消化现有库存');
+
+-- ========================= 试块质检种子 =========================
+-- 8 组试块覆盖：已合格 / 待复检 / 复检仍失败锁定 / 复检合格 / 待检 / 未到期 / 逾期
+INSERT INTO cube_group (cube_no, order_id, sampled_at, curing_method, inspector, status,
+                        project_name, strength_grade, pour_part, contractor, remark, created_at) VALUES
+('SK-2601', (SELECT id FROM production_order WHERE order_no = 'SC-2531'),
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 30 DAY), '09:00:00'), 'STANDARD', '陈立明', 'QUALIFIED',
+   '滨海国际中心 A 座', 'C35', '一期承台 A 区', '中建三局集团有限公司', '28d 一次合格',
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 30 DAY), '09:05:00')),
+('SK-2602', (SELECT id FROM production_order WHERE order_no = 'SC-2532'),
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 30 DAY), '09:30:00'), 'STANDARD', '赵永刚', 'RECHECK',
+   '云顶天境 2 号楼', 'C30', '地下室外墙', '中天建设集团有限公司', '28d 平均强度不足，待复检',
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 30 DAY), '09:35:00')),
+('SK-2603', (SELECT id FROM production_order WHERE order_no = 'SC-2533'),
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 31 DAY), '08:30:00'), 'STANDARD', '王建国', 'UNQUALIFIED',
+   '高新产业园研发楼', 'C40', '基础筏板', '中铁十四局集团有限公司', '复检仍不合格，已锁定并上报',
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 31 DAY), '08:35:00')),
+('SK-2604', (SELECT id FROM production_order WHERE order_no = 'SC-2534'),
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 29 DAY), '09:30:00'), 'STANDARD', '孙 磊', 'QUALIFIED',
+   '星海城 6 号楼', 'C25', '一层柱', '中建八局集团有限公司', '初检不合格，复检合格',
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 29 DAY), '09:35:00')),
+('SK-2605', (SELECT id FROM production_order WHERE order_no = 'SC-2601'),
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 2 DAY), '09:00:00'), 'STANDARD', '李海涛', 'TESTING',
+   '滨海国际中心 A 座', 'C35', '地下室底板 C 区', '中建三局集团有限公司', '7d/28d 均未到期',
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 2 DAY), '09:05:00')),
+('SK-2606', (SELECT id FROM production_order WHERE order_no = 'SC-2605'),
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 1 DAY), '10:00:00'), 'STANDARD', '周文斌', 'TESTING',
+   '星海城 7 号楼', 'C25', '二层顶板', '中建八局集团有限公司', '7d 未到期',
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 1 DAY), '10:05:00')),
+('SK-2607', (SELECT id FROM production_order WHERE order_no = 'SC-2535'),
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 7 DAY), '09:00:00'), 'ONSITE', '吴国庆', 'TESTING',
+   '江滨路综合管廊', 'C40', '管廊底板 K0+800', '上海隧道工程有限公司', '同条件养护，今日到 7d 龄期',
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 7 DAY), '09:05:00')),
+('SK-2608', (SELECT id FROM production_order WHERE order_no = 'SC-2536'),
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 10 DAY), '09:00:00'), 'STANDARD', '郑小川', 'TESTING',
+   '城东污水处理厂二期', 'C30', '沉淀池顶板 A 段', '北京城建集团有限责任公司', '7d 已逾期 3 天未录',
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 10 DAY), '09:05:00'));
+
+-- 关联已装车发车单（每组至少一张）
+INSERT INTO cube_dispatch_ticket (group_id, ticket_id)
+SELECT g.id, t.id FROM cube_group g
+JOIN production_order o ON o.id = g.order_id
+JOIN dispatch_ticket t ON t.order_id = o.id
+WHERE g.cube_no IN ('SK-2601','SK-2602','SK-2603','SK-2604','SK-2605','SK-2606','SK-2607','SK-2608')
+  AND t.ticket_no IN ('FC-1001','FC-1003','FC-1004','FC-1005','FC-0002','FC-0021','FC-1006','FC-0007');
+INSERT INTO cube_dispatch_ticket (group_id, ticket_id)
+SELECT g.id, t.id FROM cube_group g
+JOIN production_order o ON o.id = g.order_id
+JOIN dispatch_ticket t ON t.order_id = o.id
+WHERE g.cube_no = 'SK-2601' AND t.ticket_no = 'FC-1002';
+
+-- 配合比快照（按登记时任务单配合比复制）
+INSERT INTO mix_snapshot_item (group_id, material_code, material_name, dosage, ratio_percent, seq)
+SELECT g.id, m.material_code, m.material_name, m.dosage, m.ratio_percent, m.seq
+FROM cube_group g
+JOIN mix_ratio_item m ON m.order_id = g.order_id;
+
+-- 每组两条检测项：7d / 28d，到期 = 取样 + 龄期
+INSERT INTO strength_test_item (group_id, age_days, due_at, status, result_id, created_at)
+SELECT g.id, a.age, DATE_ADD(g.sampled_at, INTERVAL a.age DAY),
+       CASE
+           WHEN g.cube_no IN ('SK-2601','SK-2602','SK-2603','SK-2604') AND a.age = 7  THEN 'DONE'
+           WHEN g.cube_no IN ('SK-2601','SK-2604') AND a.age = 28 THEN 'DONE'
+           WHEN g.cube_no IN ('SK-2602','SK-2603') AND a.age = 28 THEN 'RECHECK'
+           ELSE 'PENDING'
+       END,
+       NULL, g.created_at
+FROM cube_group g
+JOIN (SELECT 7 AS age UNION ALL SELECT 28) a;
+
+-- 结果：7d 趋势（4 组老样本 + 今天到期的 SK-2607 暂无结果以演示待检）
+INSERT INTO strength_result (item_id, group_id, age_days, grade, strength_1, strength_2, strength_3,
+                             avg_value, min_value, verdict, design_value, avg_threshold, min_threshold,
+                             tested_at, operator_name)
+SELECT i.id, g.id, 7, g.strength_grade,
+       CASE g.cube_no
+           WHEN 'SK-2601' THEN 28.60 WHEN 'SK-2602' THEN 21.20 WHEN 'SK-2603' THEN 32.40 WHEN 'SK-2604' THEN 18.20 END,
+       CASE g.cube_no
+           WHEN 'SK-2601' THEN 29.40 WHEN 'SK-2602' THEN 22.80 WHEN 'SK-2603' THEN 33.10 WHEN 'SK-2604' THEN 19.10 END,
+       CASE g.cube_no
+           WHEN 'SK-2601' THEN 30.10 WHEN 'SK-2602' THEN 23.90 WHEN 'SK-2603' THEN 31.80 WHEN 'SK-2604' THEN 18.70 END,
+       CASE g.cube_no
+           WHEN 'SK-2601' THEN 29.37 WHEN 'SK-2602' THEN 22.63 WHEN 'SK-2603' THEN 32.43 WHEN 'SK-2604' THEN 18.67 END,
+       CASE g.cube_no
+           WHEN 'SK-2601' THEN 28.60 WHEN 'SK-2602' THEN 21.20 WHEN 'SK-2603' THEN 31.80 WHEN 'SK-2604' THEN 18.20 END,
+       CASE g.cube_no
+           WHEN 'SK-2601' THEN 'TREND_OK' WHEN 'SK-2602' THEN 'TREND_OK'
+           WHEN 'SK-2603' THEN 'TREND_OK' WHEN 'SK-2604' THEN 'TREND_LOW' END,
+       CASE g.strength_grade WHEN 'C25' THEN 25.00 WHEN 'C30' THEN 30.00 WHEN 'C35' THEN 35.00 ELSE 40.00 END,
+       ROUND(CASE g.strength_grade WHEN 'C25' THEN 25.00 WHEN 'C30' THEN 30.00 WHEN 'C35' THEN 35.00 ELSE 40.00 END * 0.75, 2),
+       0.00,
+       DATE_ADD(g.sampled_at, INTERVAL 7 DAY),
+       CASE g.cube_no WHEN 'SK-2601' THEN '陈立明' WHEN 'SK-2602' THEN '赵永刚'
+                      WHEN 'SK-2603' THEN '王建国' WHEN 'SK-2604' THEN '孙 磊' END
+FROM cube_group g
+JOIN strength_test_item i ON i.group_id = g.id AND i.age_days = 7
+WHERE g.cube_no IN ('SK-2601','SK-2602','SK-2603','SK-2604');
+
+-- 28d 正式结果：SK-2601 合格；SK-2602/SK-2603 不合格并触发复检
+INSERT INTO strength_result (item_id, group_id, age_days, grade, strength_1, strength_2, strength_3,
+                             avg_value, min_value, verdict, design_value, avg_threshold, min_threshold,
+                             tested_at, operator_name)
+SELECT i.id, g.id, 28, g.strength_grade,
+       CASE g.cube_no WHEN 'SK-2601' THEN 41.20 WHEN 'SK-2602' THEN 32.10 WHEN 'SK-2603' THEN 41.80 END,
+       CASE g.cube_no WHEN 'SK-2601' THEN 42.60 WHEN 'SK-2602' THEN 33.40 WHEN 'SK-2603' THEN 42.50 END,
+       CASE g.cube_no WHEN 'SK-2601' THEN 43.10 WHEN 'SK-2602' THEN 31.60 WHEN 'SK-2603' THEN 40.90 END,
+       CASE g.cube_no WHEN 'SK-2601' THEN 42.30 WHEN 'SK-2602' THEN 32.37 WHEN 'SK-2603' THEN 41.73 END,
+       CASE g.cube_no WHEN 'SK-2601' THEN 41.20 WHEN 'SK-2602' THEN 31.60 WHEN 'SK-2603' THEN 40.90 END,
+       CASE g.cube_no WHEN 'SK-2601' THEN 'QUALIFIED' ELSE 'UNQUALIFIED' END,
+       CASE g.strength_grade WHEN 'C30' THEN 30.00 WHEN 'C35' THEN 35.00 ELSE 40.00 END,
+       ROUND(CASE g.strength_grade WHEN 'C30' THEN 30.00 WHEN 'C35' THEN 35.00 ELSE 40.00 END * 1.15, 2),
+       ROUND(CASE g.strength_grade WHEN 'C30' THEN 30.00 WHEN 'C35' THEN 35.00 ELSE 40.00 END * 0.95, 2),
+       DATE_ADD(g.sampled_at, INTERVAL 28 DAY),
+       CASE g.cube_no WHEN 'SK-2601' THEN '陈立明' WHEN 'SK-2602' THEN '赵永刚' WHEN 'SK-2603' THEN '王建国' END
+FROM cube_group g
+JOIN strength_test_item i ON i.group_id = g.id AND i.age_days = 28
+WHERE g.cube_no IN ('SK-2601','SK-2602','SK-2603');
+
+-- SK-2604：原 28d 不合格（平均不足），复检合格（终态由复检判定为合格）
+INSERT INTO strength_result (item_id, group_id, age_days, grade, strength_1, strength_2, strength_3,
+                             avg_value, min_value, verdict, design_value, avg_threshold, min_threshold,
+                             tested_at, operator_name)
+SELECT i.id, g.id, 28, 'C25', 26.20, 27.10, 25.80, 26.37, 25.80, 'UNQUALIFIED',
+       25.00, 28.75, 23.75, DATE_ADD(g.sampled_at, INTERVAL 28 DAY), '孙 磊'
+FROM cube_group g
+JOIN strength_test_item i ON i.group_id = g.id AND i.age_days = 28
+WHERE g.cube_no = 'SK-2604';
+
+-- 回填检测项 result_id
+UPDATE strength_test_item i
+JOIN strength_result r ON r.item_id = i.id
+SET i.result_id = r.id;
+
+-- 复检任务：每组至多一条，引用原检测项与原结果；SK-2603 复检仍失败、SK-2604 复检合格
+INSERT INTO recheck_task (recheck_no, group_id, original_item_id, original_result_id,
+                          avg_1, avg_2, avg_3, avg_value, min_value, verdict,
+                          design_value, avg_threshold, min_threshold,
+                          status, created_at, created_by, tested_at, operator_name, remark)
+SELECT 'FJ-2601', g.id, i28.id, r28.id,
+       NULL, NULL, NULL, NULL, NULL, NULL, 30.00, 34.50, 28.50,
+       'PENDING', r28.tested_at, r28.operator_name, NULL, NULL, '等待双倍取样复检'
+FROM cube_group g
+JOIN strength_test_item i28 ON i28.group_id = g.id AND i28.age_days = 28
+JOIN strength_result r28 ON r28.id = i28.result_id
+WHERE g.cube_no = 'SK-2602';
+
+INSERT INTO recheck_task (recheck_no, group_id, original_item_id, original_result_id,
+                          avg_1, avg_2, avg_3, avg_value, min_value, verdict,
+                          design_value, avg_threshold, min_threshold,
+                          status, created_at, created_by, tested_at, operator_name, remark)
+SELECT 'FJ-2602', g.id, i28.id, r28.id,
+       42.60, 43.40, 41.90, 42.63, 41.90, 'UNQUALIFIED', 40.00, 46.00, 38.00,
+       'DONE', r28.tested_at, r28.operator_name, TIMESTAMP(CURDATE(), '09:30:00'), '李海涛',
+       '双倍复检平均仍低于 46.00 MPa，按不合格处理并上报监理'
+FROM cube_group g
+JOIN strength_test_item i28 ON i28.group_id = g.id AND i28.age_days = 28
+JOIN strength_result r28 ON r28.id = i28.result_id
+WHERE g.cube_no = 'SK-2603';
+
+INSERT INTO recheck_task (recheck_no, group_id, original_item_id, original_result_id,
+                          avg_1, avg_2, avg_3, avg_value, min_value, verdict,
+                          design_value, avg_threshold, min_threshold,
+                          status, created_at, created_by, tested_at, operator_name, remark)
+SELECT 'FJ-2603', g.id, i28.id, r28.id,
+       29.60, 30.20, 29.10, 29.63, 29.10, 'QUALIFIED', 25.00, 28.75, 23.75,
+       'DONE', r28.tested_at, r28.operator_name, TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 1 DAY), '10:00:00'),
+       '周文斌', '双倍复检合格，试块组恢复合格'
+FROM cube_group g
+JOIN strength_test_item i28 ON i28.group_id = g.id AND i28.age_days = 28
+JOIN strength_result r28 ON r28.id = i28.result_id
+WHERE g.cube_no = 'SK-2604';

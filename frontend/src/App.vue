@@ -69,6 +69,7 @@ import MixerLoadView from './views/MixerLoadView.vue'
 import MixRatioView from './views/MixRatioView.vue'
 import DispatchTrackView from './views/DispatchTrackView.vue'
 import SiloView from './views/SiloView.vue'
+import QualityView from './views/QualityView.vue'
 
 const steps = [
   {
@@ -98,6 +99,13 @@ const steps = [
     sub: '料仓液位与补料',
     desc: '筒仓液位柱告警、补料申请与审批',
     comp: SiloView
+  },
+  {
+    key: 'quality',
+    title: '质检',
+    sub: '试块留样与龄期检测',
+    desc: '留样登记关联发车单，7/28 天龄期检测与复检追溯闭环',
+    comp: QualityView
   }
 ]
 

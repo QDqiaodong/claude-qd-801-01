@@ -80,6 +80,15 @@ export const api = {
   rejectReplenish: (id, decidedBy, remark) =>
     http.post(`/replenish/${id}/reject`, null, { params: { decidedBy, remark } }),
 
+  // 试块质检（判定由服务端统一计算，前端只提交三块原始读数）
+  qualitySamples: (params) => http.get('/quality/samples', { params }),
+  registerSample: (data) => http.post('/quality/samples', data),
+  sampleDetail: (id) => http.get(`/quality/samples/${id}`),
+  qualityPending: () => http.get('/quality/pending'),
+  submitItemResult: (id, data) => http.post(`/quality/items/${id}/result`, data),
+  submitRecheckResult: (id, data) => http.post(`/quality/rechecks/${id}/result`, data),
+  orderQualityChain: (orderId) => http.get(`/quality/orders/${orderId}/chain`),
+
   // 统计
   statGrade: () => http.get('/stats/grade'),
   statSite: () => http.get('/stats/site'),

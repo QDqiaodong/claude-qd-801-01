@@ -3,6 +3,9 @@
 SET NAMES utf8mb4;
 
 -- ========================= 建表 =========================
+DROP TABLE IF EXISTS recheck_task;
+DROP TABLE IF EXISTS test_item;
+DROP TABLE IF EXISTS sample_group;
 DROP TABLE IF EXISTS fault_reassignment;
 DROP TABLE IF EXISTS fault_shutdown_record;
 DROP TABLE IF EXISTS replenish_request;
@@ -178,6 +181,76 @@ CREATE TABLE fault_reassignment (
     CONSTRAINT fk_fault_reassign_target FOREIGN KEY (target_mixer_id) REFERENCES mixer (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='故障任务改派明细';
 
+-- 试块组（留样登记：关联同一任务下已装车的发车单，快照工程/强度等级/配合比）
+CREATE TABLE sample_group (
+    id             BIGINT        NOT NULL AUTO_INCREMENT,
+    group_no       VARCHAR(40)   NOT NULL COMMENT '试块组编号（服务端生成 SG-试块编号）',
+    sample_no      VARCHAR(32)   NOT NULL COMMENT '试块编号（业务唯一，并发登记只成功一次）',
+    order_id       BIGINT        NOT NULL COMMENT '生产任务单',
+    ticket_id      BIGINT        NOT NULL COMMENT '关联发车单（必须已装车）',
+    sample_time    DATETIME      NOT NULL COMMENT '取样时间',
+    curing_method  VARCHAR(16)   NOT NULL COMMENT '养护方式 STANDARD/SAME_CONDITION',
+    inspector      VARCHAR(32)   NOT NULL COMMENT '登记质检员',
+    project_name   VARCHAR(128)  NOT NULL COMMENT '工程名称快照',
+    strength_grade VARCHAR(8)    NOT NULL COMMENT '强度等级快照',
+    mix_snapshot   VARCHAR(1024) NOT NULL COMMENT '配合比快照 JSON',
+    status         VARCHAR(16)   NOT NULL COMMENT 'TESTING/QUALIFIED/RECHECKING/UNQUALIFIED',
+    created_at     DATETIME      NOT NULL COMMENT '登记时间',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_sample_group_no (group_no),
+    UNIQUE KEY uk_sample_no (sample_no),
+    KEY idx_sample_order (order_id),
+    KEY idx_sample_ticket (ticket_id),
+    KEY idx_sample_status (status),
+    CONSTRAINT fk_sample_order FOREIGN KEY (order_id) REFERENCES production_order (id),
+    CONSTRAINT fk_sample_ticket FOREIGN KEY (ticket_id) REFERENCES dispatch_ticket (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='混凝土试块组';
+
+-- 龄期检测项（每组按取样时间生成 7 天 / 28 天各一条，三块强度录入后服务端统一判定）
+CREATE TABLE test_item (
+    id           BIGINT       NOT NULL AUTO_INCREMENT,
+    sample_id    BIGINT       NOT NULL COMMENT '试块组',
+    age_days     INT          NOT NULL COMMENT '龄期 7/28',
+    due_date     DATE         NOT NULL COMMENT '应检日期（取样日 + 龄期）',
+    status       VARCHAR(16)  NOT NULL COMMENT 'PENDING/DONE',
+    strength1    DECIMAL(6,2) NULL COMMENT '第 1 块抗压强度 MPa',
+    strength2    DECIMAL(6,2) NULL COMMENT '第 2 块抗压强度 MPa',
+    strength3    DECIMAL(6,2) NULL COMMENT '第 3 块抗压强度 MPa',
+    avg_strength DECIMAL(6,2) NULL COMMENT '平均值（服务端计算）',
+    min_strength DECIMAL(6,2) NULL COMMENT '最小值（服务端计算）',
+    verdict      VARCHAR(8)   NULL COMMENT '判定 PASS/FAIL（7 天为趋势判定）',
+    tested_by    VARCHAR(32)  NULL COMMENT '检测人',
+    tested_at    DATETIME     NULL COMMENT '检测时间',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_item_sample_age (sample_id, age_days),
+    KEY idx_item_due (status, due_date),
+    CONSTRAINT fk_item_sample FOREIGN KEY (sample_id) REFERENCES sample_group (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='试块龄期检测项';
+
+-- 复检任务（28 天未达门槛时生成，每个原检测项最多一条；原始读数在 test_item 上不可覆盖）
+CREATE TABLE recheck_task (
+    id             BIGINT       NOT NULL AUTO_INCREMENT,
+    recheck_no     VARCHAR(40)  NOT NULL COMMENT '复检单号（RH-试块编号）',
+    sample_id      BIGINT       NOT NULL COMMENT '试块组',
+    origin_item_id BIGINT       NOT NULL COMMENT '原 28 天检测项（唯一，防重复复检）',
+    status         VARCHAR(16)  NOT NULL COMMENT 'PENDING/DONE',
+    strength1      DECIMAL(6,2) NULL COMMENT '复检第 1 块抗压强度 MPa',
+    strength2      DECIMAL(6,2) NULL COMMENT '复检第 2 块抗压强度 MPa',
+    strength3      DECIMAL(6,2) NULL COMMENT '复检第 3 块抗压强度 MPa',
+    avg_strength   DECIMAL(6,2) NULL COMMENT '复检平均值（服务端计算）',
+    min_strength   DECIMAL(6,2) NULL COMMENT '复检最小值（服务端计算）',
+    verdict        VARCHAR(8)   NULL COMMENT '复检判定 PASS/FAIL',
+    tested_by      VARCHAR(32)  NULL COMMENT '复检人',
+    tested_at      DATETIME     NULL COMMENT '复检时间',
+    created_at     DATETIME     NOT NULL COMMENT '复检任务生成时间',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_recheck_no (recheck_no),
+    UNIQUE KEY uk_recheck_origin (origin_item_id),
+    KEY idx_recheck_sample (sample_id),
+    CONSTRAINT fk_recheck_sample FOREIGN KEY (sample_id) REFERENCES sample_group (id),
+    CONSTRAINT fk_recheck_origin FOREIGN KEY (origin_item_id) REFERENCES test_item (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='试块复检任务';
+
 -- ========================= 种子数据 =========================
 
 INSERT INTO mixing_plant (plant_code, name, line_count, location) VALUES
@@ -232,7 +305,17 @@ INSERT INTO production_order (order_no, project_name, contractor, pour_part, str
    0.430, '微膨胀混凝土，待主体沉降稳定后施工', 2),
 ('SC-2612', '高新产业园配套楼', '中铁十四局集团有限公司', '屋面刚性保护层', 'C25', 260.00, '120±30mm', 'PENDING',
    TIMESTAMP(DATE_ADD(CURDATE(), INTERVAL 2 DAY), '13:00:00'), TIMESTAMP(DATE_ADD(CURDATE(), INTERVAL 2 DAY), '17:00:00'),
-   0.514, '保护层 40mm，随捣随抹', 5);
+   0.514, '保护层 40mm，随捣随抹', 5),
+-- 历史已完成任务单（试块质检闭环演示：7 天 / 28 天 / 复检各状态）
+('SC-2588', '河西政务服务中心', '江苏省建工集团有限公司', '主楼筏板基础', 'C35', 720.00, '180±30mm', 'DONE',
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 35 DAY), '08:00:00'), TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 35 DAY), '18:00:00'),
+   0.375, '筏板大体积混凝土，标准养护试块 4 组', 2),
+('SC-2589', '滨河路立交桥', '中交第二航务工程局有限公司', '3# 桥墩承台', 'C30', 540.00, '160±30mm', 'DONE',
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 12 DAY), '08:00:00'), TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 12 DAY), '17:00:00'),
+   0.430, '承台混凝土，试块 7 天强度跟踪', 4),
+('SC-2590', '会展中心二期', '上海建工集团股份有限公司', '展厅耐磨地面', 'C40', 460.00, '160±30mm', 'DONE',
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 7 DAY), '08:00:00'), TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 7 DAY), '16:00:00'),
+   0.336, '耐磨地面，试块今日到 7 天龄期', 3);
 
 -- 配合比明细：按任务单强度等级套用参考配合比（kg/m³）
 INSERT INTO mix_ratio_item (order_id, material_code, material_name, dosage, ratio_percent, seq)
@@ -320,7 +403,15 @@ INSERT INTO dispatch_ticket (ticket_no, order_id, truck_id, load_volume, load_ti
 -- SC-2607（今天，生产中）
 ('FC-0028', 7, 9, 12.00, TIMESTAMP(CURDATE(), '08:20:00'), TIMESTAMP(CURDATE(), '08:31:00'), NULL, NULL, 'DEPARTED', NULL),
 ('FC-0029', 7, 10, 12.00, TIMESTAMP(CURDATE(), '09:00:00'), NULL, NULL, NULL, 'LOADED', '等待出厂检验'),
-('FC-0030', 7, 4, 12.00, TIMESTAMP(CURDATE(), '09:40:00'), NULL, NULL, NULL, 'LOADED', NULL);
+('FC-0030', 7, 4, 12.00, TIMESTAMP(CURDATE(), '09:40:00'), NULL, NULL, NULL, 'LOADED', NULL),
+-- SC-2588（35 天前，试块留样来源）
+('FC-0031', 13, 1, 12.00, TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 35 DAY), '08:20:00'), TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 35 DAY), '08:33:00'), TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 35 DAY), '09:15:00'), 12.00, 'SIGNED', NULL),
+('FC-0032', 13, 3, 12.00, TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 35 DAY), '10:10:00'), TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 35 DAY), '10:22:00'), TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 35 DAY), '11:05:00'), 11.90, 'SIGNED', NULL),
+('FC-0033', 13, 5, 11.50, TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 35 DAY), '13:40:00'), TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 35 DAY), '13:52:00'), TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 35 DAY), '14:35:00'), 11.50, 'SIGNED', NULL),
+-- SC-2589（12 天前）
+('FC-0034', 14, 2, 12.00, TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 12 DAY), '08:40:00'), TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 12 DAY), '08:51:00'), TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 12 DAY), '09:30:00'), 11.80, 'SIGNED', NULL),
+-- SC-2590（7 天前）
+('FC-0035', 15, 4, 11.00, TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 7 DAY), '08:30:00'), TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 7 DAY), '08:42:00'), TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 7 DAY), '09:20:00'), 11.00, 'SIGNED', NULL);
 
 INSERT INTO silo (silo_code, name, material_code, capacity_ton, stock_ton, safety_stock_ton) VALUES
 ('SIL-C01', '1# 水泥仓',  'CEMENT', 200.00, 132.50, 40.00),
@@ -350,3 +441,69 @@ INSERT INTO replenish_request (request_no, silo_id, quantity_ton, applicant, sta
    TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 2 DAY), '11:30:00'), '供应商批次未定，暂缓采购'),
 ('BL-2608', 5,  25.00, '孙 磊',  'REJECTED', TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 1 DAY), '15:40:00'), '生产经理 何斌',
    TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 1 DAY), '16:10:00'), '仓位尚可，先消化现有库存');
+
+-- 试块组留样（快照与对应任务单一致；C35 阈值：均值≥40.25 且最小值≥33.25，7 天趋势参考≥26.25）
+INSERT INTO sample_group (group_no, sample_no, order_id, ticket_id, sample_time, curing_method, inspector,
+                          project_name, strength_grade, mix_snapshot, status, created_at) VALUES
+('SG-SK-0001', 'SK-0001', 13, 31, TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 35 DAY), '08:30:00'), 'STANDARD', '王雪梅',
+   '河西政务服务中心', 'C35',
+   '[{"material":"水泥 P·O42.5","dosage":310},{"material":"粉煤灰 Ⅱ 级","dosage":60},{"material":"矿粉 S95","dosage":70},{"material":"机制砂 中砂","dosage":730},{"material":"碎石 5-25mm","dosage":1030},{"material":"拌合用水","dosage":165},{"material":"聚羧酸外加剂","dosage":9.2}]',
+   'QUALIFIED', TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 35 DAY), '08:32:00')),
+('SG-SK-0002', 'SK-0002', 13, 32, TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 35 DAY), '10:30:00'), 'STANDARD', '王雪梅',
+   '河西政务服务中心', 'C35',
+   '[{"material":"水泥 P·O42.5","dosage":310},{"material":"粉煤灰 Ⅱ 级","dosage":60},{"material":"矿粉 S95","dosage":70},{"material":"机制砂 中砂","dosage":730},{"material":"碎石 5-25mm","dosage":1030},{"material":"拌合用水","dosage":165},{"material":"聚羧酸外加剂","dosage":9.2}]',
+   'RECHECKING', TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 35 DAY), '10:33:00')),
+('SG-SK-0003', 'SK-0003', 13, 33, TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 35 DAY), '14:00:00'), 'SAME_CONDITION', '李 谨',
+   '河西政务服务中心', 'C35',
+   '[{"material":"水泥 P·O42.5","dosage":310},{"material":"粉煤灰 Ⅱ 级","dosage":60},{"material":"矿粉 S95","dosage":70},{"material":"机制砂 中砂","dosage":730},{"material":"碎石 5-25mm","dosage":1030},{"material":"拌合用水","dosage":165},{"material":"聚羧酸外加剂","dosage":9.2}]',
+   'QUALIFIED', TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 35 DAY), '14:02:00')),
+('SG-SK-0004', 'SK-0004', 13, 31, TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 35 DAY), '15:30:00'), 'STANDARD', '李 谨',
+   '河西政务服务中心', 'C35',
+   '[{"material":"水泥 P·O42.5","dosage":310},{"material":"粉煤灰 Ⅱ 级","dosage":60},{"material":"矿粉 S95","dosage":70},{"material":"机制砂 中砂","dosage":730},{"material":"碎石 5-25mm","dosage":1030},{"material":"拌合用水","dosage":165},{"material":"聚羧酸外加剂","dosage":9.2}]',
+   'UNQUALIFIED', TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 35 DAY), '15:33:00')),
+('SG-SK-0005', 'SK-0005', 14, 34, TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 12 DAY), '09:00:00'), 'STANDARD', '王雪梅',
+   '滨河路立交桥', 'C30',
+   '[{"material":"水泥 P·O42.5","dosage":270},{"material":"粉煤灰 Ⅱ 级","dosage":70},{"material":"矿粉 S95","dosage":60},{"material":"机制砂 中砂","dosage":760},{"material":"碎石 5-25mm","dosage":1040},{"material":"拌合用水","dosage":172},{"material":"聚羧酸外加剂","dosage":7.8}]',
+   'TESTING', TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 12 DAY), '09:03:00')),
+('SG-SK-0006', 'SK-0006', 15, 35, TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 7 DAY), '08:40:00'), 'STANDARD', '李 谨',
+   '会展中心二期', 'C40',
+   '[{"material":"水泥 P·O42.5","dosage":350},{"material":"粉煤灰 Ⅱ 级","dosage":50},{"material":"矿粉 S95","dosage":70},{"material":"机制砂 中砂","dosage":700},{"material":"碎石 5-25mm","dosage":1020},{"material":"拌合用水","dosage":158},{"material":"聚羧酸外加剂","dosage":10.8}]',
+   'TESTING', TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 7 DAY), '08:43:00')),
+('SG-SK-0007', 'SK-0007', 1, 1, TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 2 DAY), '08:20:00'), 'SAME_CONDITION', '王雪梅',
+   '滨海国际中心 A 座', 'C35',
+   '[{"material":"水泥 P·O42.5","dosage":310},{"material":"粉煤灰 Ⅱ 级","dosage":60},{"material":"矿粉 S95","dosage":70},{"material":"机制砂 中砂","dosage":730},{"material":"碎石 5-25mm","dosage":1030},{"material":"拌合用水","dosage":165},{"material":"聚羧酸外加剂","dosage":9.2}]',
+   'TESTING', TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 2 DAY), '08:24:00')),
+('SG-SK-0008', 'SK-0008', 6, 25, TIMESTAMP(CURDATE(), '07:50:00'), 'STANDARD', '李 谨',
+   '城东污水处理厂二期', 'C35',
+   '[{"material":"水泥 P·O42.5","dosage":310},{"material":"粉煤灰 Ⅱ 级","dosage":60},{"material":"矿粉 S95","dosage":70},{"material":"机制砂 中砂","dosage":730},{"material":"碎石 5-25mm","dosage":1030},{"material":"拌合用水","dosage":165},{"material":"聚羧酸外加剂","dosage":9.2}]',
+   'TESTING', TIMESTAMP(CURDATE(), '07:55:00'));
+
+-- 龄期检测项（已录入的读数与判定均由服务端同一套规则算出，此处种子与规则保持一致）
+INSERT INTO test_item (sample_id, age_days, due_date, status, strength1, strength2, strength3,
+                       avg_strength, min_strength, verdict, tested_by, tested_at) VALUES
+(1,  7, DATE_SUB(CURDATE(), INTERVAL 28 DAY), 'DONE', 28.50, 29.00, 27.80, 28.43, 27.80, 'PASS', '王雪梅', TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 28 DAY), '10:00:00')),
+(1, 28, DATE_SUB(CURDATE(), INTERVAL 7 DAY),  'DONE', 41.20, 40.50, 39.80, 40.50, 39.80, 'PASS', '王雪梅', TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 7 DAY), '09:30:00')),
+(2,  7, DATE_SUB(CURDATE(), INTERVAL 28 DAY), 'DONE', 26.10, 25.80, 26.90, 26.27, 25.80, 'PASS', '王雪梅', TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 28 DAY), '10:05:00')),
+(2, 28, DATE_SUB(CURDATE(), INTERVAL 7 DAY),  'DONE', 38.20, 36.50, 33.10, 35.93, 33.10, 'FAIL', '王雪梅', TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 7 DAY), '09:40:00')),
+(3,  7, DATE_SUB(CURDATE(), INTERVAL 28 DAY), 'DONE', 27.00, 26.50, 27.20, 26.90, 26.50, 'PASS', '李 谨', TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 28 DAY), '11:00:00')),
+(3, 28, DATE_SUB(CURDATE(), INTERVAL 7 DAY),  'DONE', 39.00, 38.20, 34.00, 37.07, 34.00, 'FAIL', '李 谨', TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 7 DAY), '10:00:00')),
+(4,  7, DATE_SUB(CURDATE(), INTERVAL 28 DAY), 'DONE', 25.50, 26.00, 25.20, 25.57, 25.20, 'FAIL', '李 谨', TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 28 DAY), '11:20:00')),
+(4, 28, DATE_SUB(CURDATE(), INTERVAL 7 DAY),  'DONE', 36.00, 35.20, 33.00, 34.73, 33.00, 'FAIL', '李 谨', TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 7 DAY), '10:20:00')),
+(5,  7, DATE_SUB(CURDATE(), INTERVAL 5 DAY),  'PENDING', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL),
+(5, 28, DATE_ADD(CURDATE(), INTERVAL 16 DAY), 'PENDING', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL),
+(6,  7, CURDATE(),                            'PENDING', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL),
+(6, 28, DATE_ADD(CURDATE(), INTERVAL 21 DAY), 'PENDING', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL),
+(7,  7, DATE_ADD(CURDATE(), INTERVAL 5 DAY),  'PENDING', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL),
+(7, 28, DATE_ADD(CURDATE(), INTERVAL 26 DAY), 'PENDING', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL),
+(8,  7, DATE_ADD(CURDATE(), INTERVAL 7 DAY),  'PENDING', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL),
+(8, 28, DATE_ADD(CURDATE(), INTERVAL 28 DAY), 'PENDING', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+
+-- 复检任务（SK-0002 待复检；SK-0003 复检合格转合格；SK-0004 复检仍失败锁定不合格）
+INSERT INTO recheck_task (recheck_no, sample_id, origin_item_id, status, strength1, strength2, strength3,
+                          avg_strength, min_strength, verdict, tested_by, tested_at, created_at) VALUES
+('RH-SK-0002', 2, 4, 'PENDING', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 7 DAY), '10:00:00')),
+('RH-SK-0003', 3, 6, 'DONE', 41.00, 40.80, 39.50, 40.43, 39.50, 'PASS', '李 谨',
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 5 DAY), '09:00:00'), TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 7 DAY), '10:30:00')),
+('RH-SK-0004', 4, 8, 'DONE', 38.50, 37.00, 33.80, 36.43, 33.80, 'FAIL', '王雪梅',
+   TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 4 DAY), '14:00:00'), TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 7 DAY), '11:00:00'));

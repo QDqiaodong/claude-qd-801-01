@@ -88,6 +88,7 @@
               </span>
               <span class="cp-muted">胶材 {{ o.binderDosage }} kg/m³</span>
               <span style="margin-left: auto; display: flex; gap: 6px">
+                <el-button size="small" @click="openChain(o)">试块检测链</el-button>
                 <el-button v-if="o.status === 'PENDING'" size="small" type="primary" @click="start(o)">开工校验</el-button>
                 <el-button v-if="o.status === 'PRODUCING'" size="small" @click="finish(o)">收尾完成</el-button>
               </span>
@@ -96,6 +97,9 @@
         </div>
       </div>
     </div>
+
+    <!-- 任务单视角的试块检测链 -->
+    <QualityChainDialog v-model="chainVisible" :order-id="chainOrderId" />
   </div>
 </template>
 
@@ -103,10 +107,18 @@
 import { onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { api } from '../api'
+import QualityChainDialog from './QualityChainDialog.vue'
 
 const orders = ref([])
 const grades = ['C25', 'C30', 'C35', 'C40']
 const filter = reactive({ status: '', grade: '' })
+const chainVisible = ref(false)
+const chainOrderId = ref(null)
+
+function openChain(order) {
+  chainOrderId.value = order.id
+  chainVisible.value = true
+}
 
 const COLORS = {
   CEMENT: '#2f4f4f',

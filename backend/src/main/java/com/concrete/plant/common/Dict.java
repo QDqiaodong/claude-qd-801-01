@@ -1,6 +1,7 @@
 package com.concrete.plant.common;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -98,6 +99,55 @@ public final class Dict {
             "PENDING", "待审批",
             "APPROVED", "已通过",
             "REJECTED", "已驳回");
+
+    // ---------------- 试块质检（判定规则唯一来源：数据库阈值、后端判定、前端展示全部取这里） ----------------
+
+    /** 龄期检测档位（天）：登记试块组时各生成一条检测项 */
+    public static final List<Integer> TEST_AGES = List.of(7, 28);
+
+    /** 终判龄期（7 天只作趋势参考，28 天才决定质量状态） */
+    public static final int FINAL_AGE_DAYS = 28;
+
+    /** 到应检日期后的宽限天数，超过仍未检算「逾期」 */
+    public static final int OVERDUE_GRACE_DAYS = 3;
+
+    /** 各强度等级设计抗压强度标准值 MPa */
+    private static final Map<String, BigDecimal> GRADE_DESIGN_STRENGTH = Map.of(
+            "C25", bd(25.0),
+            "C30", bd(30.0),
+            "C35", bd(35.0),
+            "C40", bd(40.0));
+
+    /** 28 天验收：平均值系数（GB/T 50107 非统计方法 λ3） */
+    public static final BigDecimal AVG_ACCEPT_COEF = BigDecimal.valueOf(1.15);
+
+    /** 28 天验收：最小值系数（λ4） */
+    public static final BigDecimal MIN_ACCEPT_COEF = BigDecimal.valueOf(0.95);
+
+    /** 7 天趋势参考系数（只展示趋势，不改变最终质量状态） */
+    public static final BigDecimal TREND_REFERENCE_COEF = BigDecimal.valueOf(0.75);
+
+    /** 单块抗压强度合理上限 MPa */
+    public static final BigDecimal MAX_STRENGTH = BigDecimal.valueOf(150);
+
+    /** 养护方式 */
+    private static final Map<String, String> CURING_METHOD = Map.of(
+            "STANDARD", "标准养护",
+            "SAME_CONDITION", "同条件养护");
+
+    /** 试块组质量状态 */
+    private static final Map<String, String> SAMPLE_STATUS = Map.of(
+            "TESTING", "检测中",
+            "QUALIFIED", "已合格",
+            "RECHECKING", "待复检",
+            "UNQUALIFIED", "不合格");
+
+    /** 检测项页面展示状态（由应检日期与录入情况推导，不落库） */
+    private static final Map<String, String> ITEM_DISPLAY_STATUS = Map.of(
+            "NOT_DUE", "未到期",
+            "DUE", "待检",
+            "OVERDUE", "逾期",
+            "DONE", "已检");
 
     // ---------------- 筒仓材料 ----------------
     private static final Map<String, String> SILO_MATERIAL_NAME = Map.of(
@@ -205,5 +255,58 @@ public final class Dict {
 
     public static String replenishStatusName(String status) {
         return status == null ? "" : REPLENISH_STATUS.getOrDefault(status, status);
+    }
+
+    // ---------------- 试块质检取值与判定 ----------------
+
+    /** 强度等级的设计抗压强度标准值 MPa */
+    public static BigDecimal designStrength(String grade) {
+        return GRADE_DESIGN_STRENGTH.getOrDefault(grade, BigDecimal.valueOf(30));
+    }
+
+    /** 28 天验收平均值门槛 MPa = 设计值 × 1.15 */
+    public static BigDecimal avgThreshold(String grade) {
+        return designStrength(grade).multiply(AVG_ACCEPT_COEF).setScale(2, RoundingMode.HALF_UP);
+    }
+
+    /** 28 天验收最小值门槛 MPa = 设计值 × 0.95 */
+    public static BigDecimal minThreshold(String grade) {
+        return designStrength(grade).multiply(MIN_ACCEPT_COEF).setScale(2, RoundingMode.HALF_UP);
+    }
+
+    /** 7 天趋势参考值 MPa = 设计值 × 0.75 */
+    public static BigDecimal trendReference(String grade) {
+        return designStrength(grade).multiply(TREND_REFERENCE_COEF).setScale(2, RoundingMode.HALF_UP);
+    }
+
+    /** 28 天（含复检）终判：平均值与最小值同时达标才合格 */
+    public static String judgeFinal(String grade, BigDecimal avg, BigDecimal min) {
+        boolean pass = avg.compareTo(avgThreshold(grade)) >= 0 && min.compareTo(minThreshold(grade)) >= 0;
+        return pass ? "PASS" : "FAIL";
+    }
+
+    /** 7 天趋势判定：只展示趋势，不改变试块组质量状态 */
+    public static String judgeTrend(String grade, BigDecimal avg) {
+        return avg.compareTo(trendReference(grade)) >= 0 ? "PASS" : "FAIL";
+    }
+
+    public static boolean isValidCuringMethod(String method) {
+        return method != null && CURING_METHOD.containsKey(method);
+    }
+
+    public static String curingMethodName(String method) {
+        return method == null ? "" : CURING_METHOD.getOrDefault(method, method);
+    }
+
+    public static boolean isValidSampleStatus(String status) {
+        return status != null && SAMPLE_STATUS.containsKey(status);
+    }
+
+    public static String sampleStatusName(String status) {
+        return status == null ? "" : SAMPLE_STATUS.getOrDefault(status, status);
+    }
+
+    public static String itemDisplayStatusName(String status) {
+        return status == null ? "" : ITEM_DISPLAY_STATUS.getOrDefault(status, status);
     }
 }
